@@ -13,7 +13,6 @@ extern int line_num;
 void yyerror(const char *s);
 
 ASTNode *root = NULL;
-
 int syntax_errors = 0;
 %}
 
@@ -80,14 +79,14 @@ int syntax_errors = 0;
 %type <node> preprocessor_directive struct_declaration union_declaration typedef_declaration enum_declaration
 %type <node> type_specifier declarator_list declarator initializer_list
 %type <node> parameter_list parameter_declaration
-%type <node> statement compound_statement statement_list
+%type <node> statement compound_statement 
 %type <node> expression_statement selection_statement iteration_statement jump_statement labeled_statement declaration
 %type <node> expression assignment_expression logical_or_expression logical_and_expression
 %type <node> inclusive_or_expression exclusive_or_expression and_expression
 %type <node> equality_expression relational_expression shift_expression
 %type <node> additive_expression multiplicative_expression cast_expression
 %type <node> unary_expression postfix_expression primary_expression
-%type <node> argument_expression_list
+%type <node> argument_expression_list block_item block_item_list constant_expression switch_case switch_case_list
 
 %%
 
@@ -99,14 +98,20 @@ program
     ;
 
 translation_unit
-    : external_declaration
+    : external_declaration 
         { $$ = $1; }
     | translation_unit external_declaration
         { 
-            ASTNode *p = $1;
-            while (p->next != NULL) p = p->next;
-            p->next = $2;
-            $$ = $1;
+            if ($1 == NULL) {
+                $$ = $2;
+            } else {
+                ASTNode *p = $1;
+                while (p->next != NULL) {
+                     p = p->next;
+                }
+                p->next = $2;
+                $$ = $1;
+            }
         }
     ;
 
@@ -120,7 +125,6 @@ external_declaration
     | typedef_declaration { $$ = $1; }
     | enum_declaration { $$ = $1; }
     ;
-
 
 /* Preprocessor directives */
 preprocessor_directive
@@ -144,7 +148,8 @@ type_specifier
 variable_declaration
     : type_specifier declarator_list SEMICOLON
         { 
-            $$ = create_node(NODE_VAR_DECL, NULL); // Placeholder wrapper
+            // Correct the AST structure: NODE_VAR_DECL -> left: type, right: declarators
+            $$ = create_node(NODE_VAR_DECL, NULL);
             $$->left = $1;
             $$->right = $2;
         }
@@ -155,8 +160,11 @@ declarator_list
         { $$ = $1; }
     | declarator_list COMMA declarator
         { 
+            // Chain declarators
             ASTNode *p = $1;
-            while(p->next) p = p->next;
+            while(p->next != NULL) {
+                 p = p->next;
+            }
             p->next = $3;
             $$ = $1;
         }
@@ -167,13 +175,35 @@ declarator
         { $$ = create_node(NODE_IDENTIFIER, $1); }
     | IDENTIFIER ASSIGN expression
         { 
-            $$ = create_node(NODE_ASSIGN, $1); 
-            $$->right = $3; 
+            // In a declaration like 'eleven i = 0;', the declarator needs to carry the assignment
+            // We'll treat this as an identifier node that HAS an assignment attached
+            $$ = create_node(NODE_IDENTIFIER, $1); 
+            $$->right = $3; // Store initializer in right child
         }
     | IDENTIFIER LBRACKET INTEGER_LITERAL RBRACKET
         { 
-             char buf[64]; sprintf(buf, "%s[%d]", $1, $3);
+             char buf[64]; sprintf(buf, "%s", $1);
              $$ = create_node(NODE_IDENTIFIER, strdup(buf));
+             // Array dimension could be stored in meta-data or a child
+             // Simplified: Treating as identifier for now
+        }
+    | IDENTIFIER LBRACKET INTEGER_LITERAL RBRACKET ASSIGN LBRACE initializer_list RBRACE
+        {
+             char buf[64]; sprintf(buf, "%s", $1);
+             $$ = create_node(NODE_IDENTIFIER, strdup(buf));
+             // Array init: simplified
+        }
+    ;
+
+initializer_list
+    : expression
+        { $$ = $1; }
+    | initializer_list COMMA expression
+        { 
+             ASTNode *p = $1;
+             while(p->next) p = p->next;
+             p->next = $3;
+             $$ = $1;
         }
     ;
 
@@ -273,26 +303,26 @@ labeled_statement
         }
     | IDENTIFIER COLON statement
         {
-             // Goto label definition
-             $$ = create_node(NODE_IDENTIFIER, $1); // Simplified
-             // In C AST, usually separate Label type. For now, treating as ID.
+             // Goto label definition - simplified, assumes next stmt gets linked implicitly
+             // or creates a label node
+             $$ = create_node(NODE_IDENTIFIER, $1);
         }
     ;
 
 compound_statement
     : LBRACE RBRACE
         { $$ = create_node(NODE_BLOCK, NULL); }
-    | LBRACE statement_list RBRACE
+    | LBRACE block_item_list RBRACE
         { 
             $$ = create_node(NODE_BLOCK, NULL);
             $$->left = $2;
         }
     ;
 
-statement_list
-    : statement
+block_item_list
+    : block_item
         { $$ = $1; }
-    | statement_list statement
+    | block_item_list block_item
         {
             if ($1 == NULL) $$ = $2;
             else {
@@ -304,9 +334,15 @@ statement_list
         }
     ;
 
+block_item
+    : declaration { $$ = $1; }
+    | statement { $$ = $1; }
+    ;
+
 expression_statement
     : SEMICOLON { $$ = NULL; }
     | expression SEMICOLON { $$ = $1; }
+    | declaration { $$ = $1; }  /* Allow declarations where expressions are expected for C99 style */
     ;
 
 selection_statement
@@ -314,19 +350,60 @@ selection_statement
         { $$ = create_if_node($3, $5, NULL); }
     | PRIMARY_GATE LPAREN expression RPAREN statement TAKE_COVER statement
         { $$ = create_if_node($3, $5, $7); }
-    | PRIMARY_GATE LPAREN expression RPAREN statement SECONDARY_GATE LPAREN expression RPAREN statement
-        { 
-            // if (e1) s1 else if (e2) s2
-            // -> if (e1) s1 else { if (e2) s2 }
-            ASTNode *nested_if = create_if_node($8, $10, NULL);
-            $$ = create_if_node($3, $5, nested_if);
-        }
-    | CHOOSE_GATE LPAREN expression RPAREN statement
+    | CHOOSE_GATE LPAREN expression RPAREN LBRACE switch_case_list RBRACE
         { 
             $$ = create_node(NODE_SWITCH, "switch");
             $$->left = $3;
-            $$->right = $5;
+            $$->right = $6;
         }
+    ;
+
+switch_case_list
+    : switch_case
+        { $$ = $1; }
+    | switch_case_list switch_case
+        {
+            ASTNode *p = $1;
+            if (p) {
+                while(p->next) p = p->next;
+                p->next = $2;
+            }
+            $$ = $1;
+        }
+    ;
+
+switch_case
+    : GATE_CASE constant_expression COLON block_item_list
+        { 
+             $$ = create_node(NODE_CASE, "case");
+             $$->left = $2;
+             $$->right = $4;
+        }
+    | FALLBACK COLON block_item_list
+        {
+             $$ = create_node(NODE_DEFAULT, "default");
+             $$->left = $3;
+        }
+    ;
+
+constant_expression
+    : constant_expression PLUS constant_expression {
+         $$ = create_binary_node(NODE_BINARY_OP, "+", $1, $3);
+    }
+    | constant_expression MINUS constant_expression {
+         $$ = create_binary_node(NODE_BINARY_OP, "-", $1, $3);
+    }
+    | constant_expression MULTIPLY constant_expression {
+         $$ = create_binary_node(NODE_BINARY_OP, "*", $1, $3);
+    }
+    | constant_expression DIVIDE constant_expression {
+         $$ = create_binary_node(NODE_BINARY_OP, "/", $1, $3);
+    }
+    | INTEGER_LITERAL { 
+         char buf[32]; sprintf(buf, "%d", $1);
+         $$ = create_node(NODE_LITERAL_INT, strdup(buf)); 
+    }
+    | IDENTIFIER { $$ = create_node(NODE_IDENTIFIER, $1); }
     ;
 
 iteration_statement
@@ -390,6 +467,14 @@ assignment_expression
     : logical_or_expression { $$ = $1; }
     | unary_expression ASSIGN assignment_expression
         { $$ = create_binary_node(NODE_ASSIGN, "=", $1, $3); }
+    | unary_expression PLUS_ASSIGN assignment_expression
+        { $$ = create_binary_node(NODE_ASSIGN, "+=", $1, $3); }
+    | unary_expression MINUS_ASSIGN assignment_expression
+        { $$ = create_binary_node(NODE_ASSIGN, "-=", $1, $3); }
+    | unary_expression MULT_ASSIGN assignment_expression
+        { $$ = create_binary_node(NODE_ASSIGN, "*=", $1, $3); }
+    | unary_expression DIV_ASSIGN assignment_expression
+        { $$ = create_binary_node(NODE_ASSIGN, "/=", $1, $3); }
     ;
 
 logical_or_expression
@@ -399,9 +484,27 @@ logical_or_expression
     ;
 
 logical_and_expression
-    : equality_expression { $$ = $1; }
-    | logical_and_expression DANGERIF_ALL_OPEN equality_expression
+    : inclusive_or_expression { $$ = $1; }
+    | logical_and_expression DANGERIF_ALL_OPEN inclusive_or_expression
         { $$ = create_binary_node(NODE_BINARY_OP, "&&", $1, $3); }
+    ;
+
+inclusive_or_expression
+    : exclusive_or_expression { $$ = $1; }
+    | inclusive_or_expression BITWISE_OR exclusive_or_expression
+        { $$ = create_binary_node(NODE_BINARY_OP, "|", $1, $3); }
+    ;
+
+exclusive_or_expression
+    : and_expression { $$ = $1; }
+    | exclusive_or_expression BITWISE_XOR and_expression
+        { $$ = create_binary_node(NODE_BINARY_OP, "^", $1, $3); }
+    ;
+
+and_expression
+    : equality_expression { $$ = $1; }
+    | and_expression BITWISE_AND equality_expression
+        { $$ = create_binary_node(NODE_BINARY_OP, "&", $1, $3); }
     ;
 
 equality_expression
@@ -413,11 +516,17 @@ equality_expression
     ;
 
 relational_expression
+    : shift_expression { $$ = $1; }
+    | relational_expression LT shift_expression { $$ = create_binary_node(NODE_BINARY_OP, "<", $1, $3); }
+    | relational_expression GT shift_expression { $$ = create_binary_node(NODE_BINARY_OP, ">", $1, $3); }
+    | relational_expression LE shift_expression { $$ = create_binary_node(NODE_BINARY_OP, "<=", $1, $3); }
+    | relational_expression GE shift_expression { $$ = create_binary_node(NODE_BINARY_OP, ">=", $1, $3); }
+    ;
+
+shift_expression
     : additive_expression { $$ = $1; }
-    | relational_expression LT additive_expression { $$ = create_binary_node(NODE_BINARY_OP, "<", $1, $3); }
-    | relational_expression GT additive_expression { $$ = create_binary_node(NODE_BINARY_OP, ">", $1, $3); }
-    | relational_expression LE additive_expression { $$ = create_binary_node(NODE_BINARY_OP, "<=", $1, $3); }
-    | relational_expression GE additive_expression { $$ = create_binary_node(NODE_BINARY_OP, ">=", $1, $3); }
+    | shift_expression LEFT_SHIFT additive_expression { $$ = create_binary_node(NODE_BINARY_OP, "<<", $1, $3); }
+    | shift_expression RIGHT_SHIFT additive_expression { $$ = create_binary_node(NODE_BINARY_OP, ">>", $1, $3); }
     ;
 
 additive_expression
@@ -427,10 +536,21 @@ additive_expression
     ;
 
 multiplicative_expression
+    : cast_expression { $$ = $1; }
+    | multiplicative_expression MULTIPLY cast_expression { $$ = create_binary_node(NODE_BINARY_OP, "*", $1, $3); }
+    | multiplicative_expression DIVIDE cast_expression { $$ = create_binary_node(NODE_BINARY_OP, "/", $1, $3); }
+    | multiplicative_expression MODULO cast_expression { $$ = create_binary_node(NODE_BINARY_OP, "%", $1, $3); }
+    ;
+
+cast_expression
     : unary_expression { $$ = $1; }
-    | multiplicative_expression MULTIPLY unary_expression { $$ = create_binary_node(NODE_BINARY_OP, "*", $1, $3); }
-    | multiplicative_expression DIVIDE unary_expression { $$ = create_binary_node(NODE_BINARY_OP, "/", $1, $3); }
-    | multiplicative_expression MODULO unary_expression { $$ = create_binary_node(NODE_BINARY_OP, "%", $1, $3); }
+    | LPAREN type_specifier RPAREN cast_expression
+        { 
+             // Simplified cast node
+             $$ = create_node(NODE_UNARY_OP, "cast");
+             $$->left = $4;
+             // type info ignored for now in this simple node structure, or store in val?
+        }
     ;
 
 unary_expression
@@ -460,6 +580,16 @@ postfix_expression
             ASTNode *call = create_node(NODE_FUNC_CALL, $1->val);
             $$ = call;
         }
+    | postfix_expression LBRACKET expression RBRACKET
+        { 
+             $$ = create_binary_node(NODE_BINARY_OP, "[]", $1, $3);
+        }
+    | postfix_expression DOT IDENTIFIER
+        { $$ = create_binary_node(NODE_BINARY_OP, ".", $1, create_node(NODE_IDENTIFIER, $3)); }
+    | postfix_expression ARROW IDENTIFIER
+        { $$ = create_binary_node(NODE_BINARY_OP, "->", $1, create_node(NODE_IDENTIFIER, $3)); }
+    | postfix_expression INCREMENT { $$ = create_unary_node(NODE_UNARY_OP, "p++", $1); } // Postfix vs prefix distinction needed in codegen
+    | postfix_expression DECREMENT { $$ = create_unary_node(NODE_UNARY_OP, "p--", $1); }
     ;
 
 primary_expression
@@ -480,11 +610,10 @@ primary_expression
     | LPAREN expression RPAREN { $$ = $2; }
     | RADIO_OUT { $$ = create_node(NODE_IDENTIFIER, "printf"); }
     | RADIO_IN { $$ = create_node(NODE_IDENTIFIER, "scanf"); }
-    | FRIENDSDONTLIE { $$ = create_node(NODE_LITERAL_INT, "true"); }
-    | LIES { $$ = create_node(NODE_LITERAL_INT, "false"); }
-    | NOTHING { $$ = create_node(NODE_LITERAL_INT, "NULL"); }
+    | FRIENDSDONTLIE { $$ = create_node(NODE_LITERAL_INT, "1"); }
+    | LIES { $$ = create_node(NODE_LITERAL_INT, "0"); }
+    | NOTHING { $$ = create_node(NODE_LITERAL_INT, "0"); }
     ;
-
 
 argument_expression_list
     : assignment_expression { $$ = $1; }
@@ -518,309 +647,21 @@ int main(int argc, char **argv) {
 
     yyparse();
 
-    if (syntax_errors == 0) {
-        printf("\nRunning Optimizations (Constant Folding)...\n");
+    if (syntax_errors == 0 && root != NULL) {
+        fprintf(stderr, "\nRunning Optimizations (Constant Folding)...\n");
         optimize_ast(root);
 
-        printf("\nGenerating Intermediate Code (3-Address Code)...\n");
-        printf("==============================================\n");
-        // Simple TAC generation (this is a conceptual demonstration)
-        // In a real compiler, we would use a more robust TAC structure.
-        // For now, let's just inspect the tree nodes.
-        // (Function not fully implemented in ast.c perfectly for all cases, but structure exists)
+        fprintf(stderr, "\nGenerating Intermediate Code (3-Address Code)...\n");
+        fprintf(stderr, "==============================================\n");
+        // Simple TAC generation 
+        generate_tac(root);
         
-        printf("\nGenerating C Code...\n");
-        printf("====================\n\n");
+        fprintf(stderr, "\nGenerating C Code...\n");
+        fprintf(stderr, "====================\n\n");
         generate_c_code(root);
+    } else {
+        printf("Compilation failed with %d errors.\n", syntax_errors);
     }
 
     return 0;
-}
-
-
-statement_list
-    : statement
-    | statement_list statement
-    ;
-
-statement
-    : expression_statement
-    | compound_statement
-    | selection_statement
-    | iteration_statement
-    | jump_statement
-    | variable_declaration
-    | io_statement
-    ;
-
-expression_statement
-    : SEMICOLON
-    | expression SEMICOLON
-    ;
-
-/* Selection statements (conditionals) */
-selection_statement
-    : PRIMARY_GATE LPAREN expression RPAREN statement
-        { printf("✓ If statement recognized\n"); }
-    | PRIMARY_GATE LPAREN expression RPAREN statement TAKE_COVER statement
-        { printf("✓ If-else statement recognized\n"); }
-    | PRIMARY_GATE LPAREN expression RPAREN statement SECONDARY_GATE LPAREN expression RPAREN statement
-        { printf("✓ If-elseif statement recognized\n"); }
-    | PRIMARY_GATE LPAREN expression RPAREN statement SECONDARY_GATE LPAREN expression RPAREN statement TAKE_COVER statement
-        { printf("✓ If-elseif-else statement recognized\n"); }
-    | CHOOSE_GATE LPAREN expression RPAREN LBRACE switch_case_list RBRACE
-        { printf("✓ Switch statement recognized\n"); }
-    ;
-
-switch_case_list
-    : switch_case
-    | switch_case_list switch_case
-    ;
-
-switch_case
-    : GATE_CASE constant_expression COLON statement_list
-    | FALLBACK COLON statement_list
-    ;
-
-constant_expression
-    : INTEGER_LITERAL
-    | IDENTIFIER
-    ;
-
-/* Iteration statements (loops) */
-iteration_statement
-    : COUNTDOWN LPAREN expression_statement expression_statement RPAREN statement
-        { printf("✓ For loop recognized\n"); }
-    | COUNTDOWN LPAREN expression_statement expression_statement expression RPAREN statement
-        { printf("✓ For loop recognized\n"); }
-    | CLOCK_CHIME LPAREN expression RPAREN statement
-        { printf("✓ While loop recognized\n"); }
-    | INVADE statement CLOCK_CHIME LPAREN expression RPAREN SEMICOLON
-        { printf("✓ Do-while loop recognized\n"); }
-    ;
-
-/* Jump statements */
-jump_statement
-    : ESCAPE SEMICOLON
-        { printf("✓ Break statement\n"); }
-    | SLIP SEMICOLON
-        { printf("✓ Continue statement\n"); }
-    | TO_REAL_WORLD SEMICOLON
-        { printf("✓ Return statement (void)\n"); }
-    | TO_REAL_WORLD expression SEMICOLON
-        { printf("✓ Return statement\n"); }
-    | SUMMONED IDENTIFIER SEMICOLON
-        { printf("✓ Goto statement to label: %s\n", $2); }
-    | SHUTDOWN LPAREN expression RPAREN SEMICOLON
-        { printf("✓ Exit statement\n"); }
-    | IDENTIFIER COLON
-        { printf("✓ Label: %s\n", $1); }
-    ;
-
-/* I/O statements */
-io_statement
-    : RADIO_OUT LPAREN argument_expression_list RPAREN SEMICOLON
-        { printf("✓ Output statement (radio_out)\n"); }
-    | RADIO_IN LPAREN argument_expression_list RPAREN SEMICOLON
-        { printf("✓ Input statement (radio_in)\n"); }
-    ;
-
-/* Expressions */
-expression
-    : assignment_expression
-    | expression COMMA assignment_expression
-    ;
-
-assignment_expression
-    : logical_or_expression
-    | unary_expression assignment_operator assignment_expression
-    ;
-
-assignment_operator
-    : ASSIGN
-    | PLUS_ASSIGN
-    | MINUS_ASSIGN
-    | MULT_ASSIGN
-    | DIV_ASSIGN
-    | MOD_ASSIGN
-    ;
-
-logical_or_expression
-    : logical_and_expression
-    | logical_or_expression THREATIF_ANY_OPEN logical_and_expression
-    ;
-
-logical_and_expression
-    : bitwise_or_expression
-    | logical_and_expression DANGERIF_ALL_OPEN bitwise_or_expression
-    ;
-
-bitwise_or_expression
-    : bitwise_xor_expression
-    | bitwise_or_expression BITWISE_OR bitwise_xor_expression
-    ;
-
-bitwise_xor_expression
-    : bitwise_and_expression
-    | bitwise_xor_expression BITWISE_XOR bitwise_and_expression
-    ;
-
-bitwise_and_expression
-    : equality_expression
-    | bitwise_and_expression BITWISE_AND equality_expression
-    ;
-
-equality_expression
-    : relational_expression
-    | equality_expression EQ relational_expression
-    | equality_expression NE relational_expression
-    ;
-
-relational_expression
-    : shift_expression
-    | relational_expression LT shift_expression
-    | relational_expression GT shift_expression
-    | relational_expression LE shift_expression
-    | relational_expression GE shift_expression
-    ;
-
-shift_expression
-    : additive_expression
-    | shift_expression LEFT_SHIFT additive_expression
-    | shift_expression RIGHT_SHIFT additive_expression
-    ;
-
-additive_expression
-    : multiplicative_expression
-    | additive_expression PLUS multiplicative_expression
-    | additive_expression MINUS multiplicative_expression
-    ;
-
-multiplicative_expression
-    : unary_expression
-    | multiplicative_expression MULTIPLY unary_expression
-    | multiplicative_expression DIVIDE unary_expression
-    | multiplicative_expression MODULO unary_expression
-    ;
-
-unary_expression
-    : postfix_expression
-    | INCREMENT unary_expression
-    | DECREMENT unary_expression
-    | unary_operator unary_expression
-    | GAUGE LPAREN type_specifier RPAREN
-    | GAUGE LPAREN unary_expression RPAREN
-    ;
-
-unary_operator
-    : PLUS
-    | MINUS
-    | UPSIDE_DOWN
-    | BITWISE_NOT
-    | MULTIPLY  /* pointer dereference */
-    | BITWISE_AND  /* address-of */
-    ;
-
-postfix_expression
-    : primary_expression
-    | postfix_expression LBRACKET expression RBRACKET
-    | postfix_expression LPAREN RPAREN
-        { printf("  Function call (no arguments)\n"); }
-    | postfix_expression LPAREN argument_expression_list RPAREN
-        { printf("  Function call with arguments\n"); }
-    | postfix_expression DOT IDENTIFIER
-    | postfix_expression ARROW IDENTIFIER
-    | postfix_expression INCREMENT
-    | postfix_expression DECREMENT
-    ;
-
-primary_expression
-    : IDENTIFIER
-        { 
-            Symbol *sym = lookup_symbol($1);
-            if (sym == NULL) {
-                printf("⚠ Warning: Identifier '%s' used before declaration (line %d)\n", $1, line_num);
-            }
-        }
-    | INTEGER_LITERAL
-    | FLOAT_LITERAL
-    | STRING_LITERAL
-    | FRIENDSDONTLIE
-    | LIES
-    | NOTHING
-    | LPAREN expression RPAREN
-    ;
-
-argument_expression_list
-    : assignment_expression
-    | argument_expression_list COMMA assignment_expression
-    ;
-
-%%
-
-void yyerror(const char *s) {
-    fprintf(stderr, "✗ Syntax error at line %d: %s\n", line_num, s);
-    syntax_errors++;
-}
-
-int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <input_file.hwk>\n", argv[0]);
-        return 1;
-    }
-    
-    FILE *input_file = fopen(argv[1], "r");
-    if (!input_file) {
-        fprintf(stderr, "Error: Cannot open input file '%s'\n", argv[1]);
-        return 1;
-    }
-    
-    yyin = input_file;
-    
-    printf("================================================================\n");
-    printf("          HAWKINSLANG BISON PARSER - SYNTAX ANALYSIS           \n");
-    printf("================================================================\n");
-    printf("Input File: %s\n", argv[1]);
-    printf("================================================================\n\n");
-    
-    int result = yyparse();
-    
-    printf("\n================================================================\n");
-    printf("                    SYMBOL TABLE                                \n");
-    printf("================================================================\n");
-    
-    Symbol *sym = symbol_table;
-    if (sym == NULL) {
-        printf("(No symbols declared)\n");
-    } else {
-        while (sym != NULL) {
-            printf("Symbol: %-20s Type: %-15s Line: %d\n", sym->name, sym->type, sym->line_declared);
-            sym = sym->next;
-        }
-    }
-    
-    printf("\n================================================================\n");
-    printf("                    PARSING RESULT                              \n");
-    printf("================================================================\n");
-    
-    if (result == 0 && syntax_errors == 0) {
-        printf("✓ Status: PARSING SUCCESSFUL\n");
-        printf("  No syntax errors found.\n");
-    } else {
-        printf("✗ Status: PARSING FAILED\n");
-        printf("  Total syntax errors: %d\n", syntax_errors);
-    }
-    printf("================================================================\n");
-    
-    fclose(input_file);
-    
-    // Free symbol table
-    sym = symbol_table;
-    while (sym != NULL) {
-        Symbol *next = sym->next;
-        free(sym);
-        sym = next;
-    }
-    
-    return (result != 0 || syntax_errors > 0);
 }

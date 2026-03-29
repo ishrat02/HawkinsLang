@@ -2,9 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ast.h"
 #include "hawkinslang.tab.h"
 
 int line_num = 1;
+
+void yyerror(const char *s);
 %}
 
 %option noyywrap
@@ -29,9 +32,10 @@ WHITESPACE  [ \t\r]+
                                 }
                             }
 
-    /* Preprocessor directives */
+    /* Preprocessor directives - Handle raw hash directives */
 "#library"                  { return LIBRARY_IMPORT; }
 "#MACRO"                    { return MACRO_DEF; }
+"#"                         { /* ignore unknown directives for now */ }
 
     /* Keywords - Main and Functions */
 "hawkins"                   { return HAWKINS; }
@@ -163,7 +167,26 @@ WHITESPACE  [ \t\r]+
                             }
 
 \'([^\\\']|\\.)?\'          {
-                                yylval.ival = yytext[1];
+                                if (yytext[1] == '\\') {
+                                    switch (yytext[2]) {
+                                        case 'n': yylval.ival = '\n'; break;
+                                        case 't': yylval.ival = '\t'; break;
+                                        case 'r': yylval.ival = '\r'; break;
+                                        case 'e': yylval.ival = '\e'; break;
+                                        case 'a': yylval.ival = '\a'; break;
+                                        case 'b': yylval.ival = '\b'; break;
+                                        case 'v': yylval.ival = '\v'; break;
+                                        case 'f': yylval.ival = '\f'; break;
+                                        case '0': yylval.ival = '\0'; break;
+                                        case '\\': yylval.ival = '\\'; break;
+                                        case '\'': yylval.ival = '\''; break;
+                                        case '\"': yylval.ival = '\"'; break;
+                                        case '\?': yylval.ival = '\?'; break;
+                                        default: yylval.ival = yytext[2]; break;
+                                    }
+                                } else {
+                                    yylval.ival = yytext[1];
+                                }
                                 return INTEGER_LITERAL; /* Treat char as int */
                             }
 

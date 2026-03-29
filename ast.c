@@ -93,6 +93,13 @@ void generate_c_code_recursive(ASTNode *node, int indent) {
             ASTNode *stmt = node->left;
             while (stmt) {
                 generate_c_code_recursive(stmt, indent + 1);
+                
+                // Add semicolon for expression statements
+                if (stmt->type == NODE_ASSIGN || stmt->type == NODE_FUNC_CALL || 
+                    stmt->type == NODE_UNARY_OP || stmt->type == NODE_BINARY_OP) {
+                    printf(";\n");
+                }
+                
                 stmt = stmt->next;
             }
             print_indent(indent);
@@ -102,10 +109,18 @@ void generate_c_code_recursive(ASTNode *node, int indent) {
         case NODE_VAR_DECL:
             print_indent(indent);
             generate_c_code_recursive(node->left, 0); // Type
-            printf(" %s", node->val);
-            if (node->right) {
-                printf(" = ");
-                generate_c_code_recursive(node->right, 0);
+            printf(" ");
+            
+            ASTNode *decl = node->right;
+            while (decl) {
+                // decl is NODE_IDENTIFIER, possibly with initializer in right child
+                printf("%s", decl->val);
+                if (decl->right) {
+                    printf(" = ");
+                    generate_c_code_recursive(decl->right, 0);
+                }
+                decl = decl->next;
+                if (decl) printf(", ");
             }
             printf(";\n");
             break;
@@ -120,8 +135,8 @@ void generate_c_code_recursive(ASTNode *node, int indent) {
             break;
 
         case NODE_ASSIGN:
-            printf("%s = ", node->val); // Or left child if complex lvalue
-            if (node->left && !node->val) generate_c_code_recursive(node->left, 0); // Handle complex lvalue
+            generate_c_code_recursive(node->left, 0);
+            printf(" %s ", node->val);
             generate_c_code_recursive(node->right, 0);
             break;
 
@@ -206,6 +221,14 @@ void generate_c_code_recursive(ASTNode *node, int indent) {
                 printf("sizeof(");
                 generate_c_code_recursive(node->left, 0);
                 printf(")");
+            } else if (strcmp(node->val, "p++") == 0) {
+                printf("(");
+                generate_c_code_recursive(node->left, 0);
+                printf("++)");
+            } else if (strcmp(node->val, "p--") == 0) {
+                printf("(");
+                generate_c_code_recursive(node->left, 0);
+                printf("--)");
             } else {
                 printf("(%s", node->val);
                 generate_c_code_recursive(node->left, 0);
@@ -344,7 +367,7 @@ void optimize_ast(ASTNode *node) {
             else performed = 0;
 
             if (performed) {
-                printf("✓ Optimized: Constant folding %d %s %d -> %d\n", left_val, node->val, right_val, result);
+                fprintf(stderr, "✓ Optimized: Constant folding %d %s %d -> %d\n", left_val, node->val, right_val, result);
                 char buf[32];
                 sprintf(buf, "%d", result);
                 
@@ -390,14 +413,43 @@ char* generate_tac_expr(ASTNode *node) {
         char *left = generate_tac_expr(node->left);
         char *right = generate_tac_expr(node->right);
         char *temp = new_temp();
-        printf("%s = %s %s %s\n", temp, left, node->val, right);
+        fprintf(stderr, "%s = %s %s %s\n", temp, left, node->val, right);
         return temp;
     }
 
     if (node->type == NODE_UNARY_OP) {
         char *child = generate_tac_expr(node->left);
         char *temp = new_temp();
-        printf("%s = %s %s\n", temp, node->val, child);
+        if (strcmp(node->val, "p++") == 0) {
+            fprintf(stderr, "%s = %s\n", temp, child); // Capture current value
+            fprintf(stderr, "%s = %s + 1\n", child, child); // Increment variable
+        } else if (strcmp(node->val, "p--") == 0) {
+            fprintf(stderr, "%s = %s\n", temp, child);
+            fprintf(stderr, "%s = %s - 1\n", child, child);
+        } else {
+            fprintf(stderr, "%s = %s %s\n", temp, node->val, child);
+        }
+        return temp;
+    }
+    
+    if (node->type == NODE_FUNC_CALL) {
+        // Handle arguments list (node->left)
+        ASTNode *arg = node->left;
+        int arg_count = 0;
+        char *arg_temps[20]; // Simple limit
+        
+        while (arg && arg_count < 20) {
+            arg_temps[arg_count++] = generate_tac_expr(arg);
+            arg = arg->next;
+        }
+        
+        // Push arguments (in reverse or order depending on convention, simple here)
+        for (int i = 0; i < arg_count; i++) {
+             fprintf(stderr, "param %s\n", arg_temps[i]);
+        }
+        
+        char *temp = new_temp();
+        fprintf(stderr, "%s = call %s, %d\n", temp, node->val, arg_count);
         return temp;
     }
     
@@ -405,7 +457,7 @@ char* generate_tac_expr(ASTNode *node) {
         char *rhs = generate_tac_expr(node->right);
         // Assuming left is identifier for now
         char *lhs = node->val ? node->val : (node->left ? node->left->val : "unknown"); 
-        printf("%s = %s\n", lhs, rhs);
+        fprintf(stderr, "%s = %s\n", lhs, rhs);
         return strdup(lhs);
     }
     
@@ -417,8 +469,8 @@ void generate_tac(ASTNode *node) {
     if (!node) return;
 
     if (node->type == NODE_PROGRAM) {
-        printf("\nGenerating Intermediate Code (3-Address Code)...\n");
-        printf("==================================================\n");
+        fprintf(stderr, "\nGenerating Intermediate Code (3-Address Code)...\n");
+        fprintf(stderr, "==================================================\n");
     }
 
     switch (node->type) {
@@ -427,9 +479,9 @@ void generate_tac(ASTNode *node) {
             break;
 
         case NODE_FUNCTION_DEF:
-            printf("\nfunc %s:\n", node->val);
+            fprintf(stderr, "\nfunc %s:\n", node->val);
             generate_tac(node->third); // body
-            printf("endfunc\n");
+            fprintf(stderr, "endfunc\n");
             break;
 
         case NODE_BLOCK:
@@ -443,15 +495,27 @@ void generate_tac(ASTNode *node) {
             break;
             
         case NODE_VAR_DECL:
-            if (node->right) {
-                 // Assignment part
-                 char *rhs = generate_tac_expr(node->right);
-                 printf("%s = %s\n", node->val, rhs);
+            {
+                ASTNode *decl = node->right;
+                while (decl) {
+                    if (decl->right) {
+                        // Assignment: variable = initializer
+                        char *rhs = generate_tac_expr(decl->right);
+                        fprintf(stderr, "%s = %s\n", decl->val, rhs);
+                        // In TAC, we don't necessarily need to return the value of a declaration statement
+                    } else {
+                        // Just declaration, TAC doesn't care much unless it's initialized
+                        fprintf(stderr, "%s = uninitialized\n", decl->val);
+                    }
+                    decl = decl->next;
+                }
             }
             break;
 
         case NODE_ASSIGN:
-        case NODE_BINARY_OP: // If standalone expression statement
+        case NODE_BINARY_OP: 
+        case NODE_UNARY_OP:
+        case NODE_FUNC_CALL:
              generate_tac_expr(node);
              break;
 
@@ -463,19 +527,19 @@ void generate_tac(ASTNode *node) {
                 
                 // Condition (Simplified)
                 char *cond = generate_tac_expr(node->left);
-                printf("if %s goto %s\n", cond, l_true);
-                printf("goto %s\n", l_false);
+                fprintf(stderr, "if %s goto %s\n", cond, l_true);
+                fprintf(stderr, "goto %s\n", l_false);
                 
-                printf("%s:\n", l_true);
+                fprintf(stderr, "%s:\n", l_true);
                 generate_tac(node->right);
-                printf("goto %s\n", l_end);
+                fprintf(stderr, "goto %s\n", l_end);
                 
-                printf("%s:\n", l_false);
+                fprintf(stderr, "%s:\n", l_false);
                 if (node->third) {
                     generate_tac(node->third);
                 }
                 
-                printf("%s:\n", l_end);
+                fprintf(stderr, "%s:\n", l_end);
             }
             break;
             
@@ -485,25 +549,25 @@ void generate_tac(ASTNode *node) {
                  char *l_body = new_label();
                  char *l_end = new_label();
 
-                 printf("%s:\n", l_start);
+                 fprintf(stderr, "%s:\n", l_start);
                  char *cond = generate_tac_expr(node->left);
-                 printf("if %s goto %s\n", cond, l_body);
-                 printf("goto %s\n", l_end);
+                 fprintf(stderr, "if %s goto %s\n", cond, l_body);
+                 fprintf(stderr, "goto %s\n", l_end);
                  
-                 printf("%s:\n", l_body);
+                 fprintf(stderr, "%s:\n", l_body);
                  generate_tac(node->right);
-                 printf("goto %s\n", l_start);
+                 fprintf(stderr, "goto %s\n", l_start);
                  
-                 printf("%s:\n", l_end);
+                 fprintf(stderr, "%s:\n", l_end);
              }
              break;
 
         case NODE_RETURN:
             if (node->left) {
                 char *ret = generate_tac_expr(node->left);
-                printf("return %s\n", ret);
+                fprintf(stderr, "return %s\n", ret);
             } else {
-                printf("return\n");
+                fprintf(stderr, "return\n");
             }
             break;
 

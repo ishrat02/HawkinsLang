@@ -1,0 +1,27 @@
+#library "stdio.h"
+#MACRO MAX_VAL 100
+
+eleven portal factorial(eleven n) {
+    primary_gate (n <= 1) {
+        to_real_world 1;
+    }
+    to_real_world n * factorial(n - 1);
+}
+
+the_void hawkins() {
+    eleven i;
+    i = 0;
+    
+    eleven x;
+    x = 3 + 4 * 10;
+    
+    printf("Value of x: %d\n", x);
+    printf("Looping from 0 to 4:\n");
+    
+    clock_chime (i < 5) {
+        printf("i = %d\n", i);
+        i++;
+    }
+    
+    printf("Factorial of 5: %d\n", factorial(5));
+}
